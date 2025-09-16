@@ -1,0 +1,26 @@
+Training data: 1500 cases - 1075 benign (0 label)
+				  425 csPCA (lesion labels 2,3,4,5)
+
+
+X - raw images (different modalities)
+Y - (ground truth) - csPCa_lesion_delineations/human_expert/resampled/
+
+
+
+##Pre-processing
+
+1. label_map construction of the .nii.gz files to map the case_id with
+    the path of the maked annotated files
+
+2. matching the label_map with the raw data case id
+    - check for single modality first
+    - integrate strict multi-modality
+    - consider techniques to account for missing modalities in certain samples
+
+
+
+
+##Model Architecture
+
+1. #3D CNN
+2. #3D vision transformers
