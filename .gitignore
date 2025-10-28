@@ -1,0 +1,33 @@
+# IDE / editor settings
+.idea/
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Data and checkpoints
+data/
+checkpoints/
+training/
+*.h5
+*.pth
+*.pt
+*.ckpt
+*.npy
+*.npz
+*.pkl
+*.csv
+
+# Model weights (if not code)
+models/*.pth
+models/*.pt
+models/*.h5
+models/*.ckpt
+
+# System files
+.DS_Store
+Thumbs.db
+

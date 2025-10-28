@@ -60,6 +60,8 @@ def main():
     matching_dict = matching_raw_labels(mri_root, label_map)
     return matching_dict
     # print(matching_dict)
+    # print(len(matching_dict))
+
 
 
 

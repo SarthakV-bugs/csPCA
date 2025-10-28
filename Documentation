@@ -10,7 +10,8 @@ Y - (ground truth) - csPCa_lesion_delineations/human_expert/resampled/
 ##Pre-processing
 
 1. label_map construction of the .nii.gz files to map the case_id with
-    the path of the maked annotated files
+    the path of the masked annotated files
+
 
 2. matching the label_map with the raw data case id
     - check for single modality first
