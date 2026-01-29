@@ -2,6 +2,11 @@
 .idea/
 .vscode/
 
+#Local documentation and notes
+*.md
+*.txt
+*.sh
+
 # Python cache
 __pycache__/
 *.pyc
@@ -11,7 +16,6 @@ __pycache__/
 # Data and checkpoints
 data/
 checkpoints/
-training/
 *.h5
 *.pth
 *.pt

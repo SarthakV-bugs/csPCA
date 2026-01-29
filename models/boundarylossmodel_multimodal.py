@@ -1,5 +1,21 @@
 # -*- coding: utf-8 -*-
-"""csPCA_Models - Local System Version - Modularized"""
+"""csPCA Models - Multimodal Version (T2W + ADC + DWI)
+
+Improvements over 2D/2.5D baseline:
+- Uses multiple MRI modalities as 3-channel input
+- Channel 1: T2W (morphology)
+- Channel 2: ADC (diffusion - restricted water = high ADC in lesions)
+- Channel 3: DWI (high signal in lesions)
+- Minimal architectural change (3-channel input)
+
+Phase transition: 2.5D spatial context → Multimodal representation
+Objective: Enable lesion distinction by providing metabolic/diffusion contrast
+
+Why this works:
+- T2W alone: Cannot distinguish lesions from benign tissue
+- ADC + DWI: Directly indicate tissue restriction (cancer signature)
+- Combined: Morphology + metabolic markers = lesion detection
+"""
 
 """# Install dependencies (run in terminal/command prompt first)"""
 # pip install SimpleITK
@@ -40,65 +56,65 @@ from training.losses import BoundaryDiceFocalLoss
 class Config:
     # Paths (update to your local system)
     project_root = Path(__file__).parent.parent
-    checkpoint_dir = project_root / 'checkpoints'
+    checkpoint_dir = project_root / 'checkpoints_multimodal'  # Separate for multimodal
     labels_root = project_root / 'data' / 'picai_labels'
     mri_root = project_root / 'data' / 'mri_images'
 
-    # Dataset - SMALL TEST RUN
-    # Available: ~425 positive cases, ~1075 negative cases (1500 total)
+    # Dataset - SMALL TEST RUN (Multimodal version)
     num_positive_to_use = 10  # SMALL TEST - increase to 300 for full training
     num_negative_to_use = 25  # SMALL TEST - increase to 750 for full training
     target_size = (256, 256)
     batch_size = 4  # Smaller batch for testing
-    num_workers = 0  # START WITH 0 FOR DEBUGGING - increase after fix confirmed
+    num_workers = 0  # START WITH 0 FOR DEBUGGING
     
-    # Data splits (applied after selecting above cases)
-    train_split = 0.70  # 70% for training
-    val_split = 0.15   # 15% for validation
-    test_split = 0.15  # 15% for testing
+    # Data splits
+    train_split = 0.70
+    val_split = 0.15
+    test_split = 0.15
 
     # Training
-    num_epochs = 3  # SMALL TEST - increase to 20 for full training
+    num_epochs = 3  # SMALL TEST
     learning_rate = 1e-4
     weight_decay = 1e-5
-    patience = 5  # Increased patience for longer training
+    patience = 5
     
     # Learning rate scheduling
-    lr_scheduler = 'cosine'  # 'cosine' or 'exponential'
+    lr_scheduler = 'cosine'
     warmup_epochs = 2
 
-    # Loss weights - UPDATED FOR CLASS IMBALANCE
-    # Positive class is minority: ~28% positive, ~72% negative
-    alpha = 0.75  # Focal loss alpha
-    gamma = 2.0   # Focal loss gamma
+    # Loss weights
+    alpha = 0.75
+    gamma = 2.0
     
     # Component weights in combined loss
     dice_weight = 0.4
     focal_weight = 0.4
     boundary_weight = 0.2
     
-    # Class weighting for BCE component
-    # pos_weight = number_negative / number_positive
-    # Approximate: 1075 / 425 ≈ 2.5
-    pos_weight = 2.5  # Weight positive samples more heavily
+    # Class weighting
+    pos_weight = 2.5
 
     # Data augmentation
     enable_augmentation = True
-    rotation_angle = 15  # degrees
+    rotation_angle = 15
     elastic_deformation = True
-    intensity_variation = 0.1  # ±10% intensity variation
+    intensity_variation = 0.1
 
-    # Sampling strategy for handling class imbalance
-    use_weighted_sampling = True  # Oversample positive slices
-    positive_slice_weight = 3.0  # 3x more likely to sample positive slices
+    # Sampling strategy
+    use_weighted_sampling = True
+    positive_slice_weight = 3.0
 
     # Postprocessing
     min_size = 50
     max_holes = 30
     
     # Validation/Testing
-    optimal_threshold_search = True  # Search for best threshold on val set
-    threshold_range = [0.1, 0.9, 0.05]  # [min, max, step]
+    optimal_threshold_search = True
+    threshold_range = [0.1, 0.9, 0.05]
+
+    # 🆕 Multimodal configuration
+    modalities = ['t2', 'adc', 'hbv']  # T2W, ADC, DWI (high b-value)
+    num_modalities = len(modalities)
 
 
 config = Config()
@@ -107,18 +123,31 @@ config = Config()
 os.makedirs(config.checkpoint_dir, exist_ok=True)
 
 print("="*60)
-print("CONFIGURATION")
+print("CONFIGURATION (MULTIMODAL: T2W + ADC + DWI)")
 print("="*60)
 print(f"Checkpoint directory: {config.checkpoint_dir}")
 print(f"Labels root: {config.labels_root}")
 print(f"MRI root: {config.mri_root}")
 print(f"Target dataset size: {config.num_positive_to_use + config.num_negative_to_use}")
+print(f"Input channels: 3 (T2W, ADC, DWI)")
+print(f"Modalities: {config.modalities}")
 print("="*60)
 
-"""# Dataset Classes"""
+"""# Dataset Classes - MULTIMODAL VERSION"""
 
-class T2WDataset2D(Dataset):
-    """2D Dataset that extracts individual slices from 3D volumes."""
+class MultimodalT2WDataset(Dataset):
+    """Multimodal dataset loading T2W, ADC, and DWI.
+    
+    Each sample returns:
+    - Image: 3-channel tensor (T2W, ADC, DWI)
+    - Label: ground truth mask
+    - is_positive: case-level label
+    
+    Modality mapping:
+    - T2W (t2): Anatomical image
+    - ADC (adc): Diffusion coefficient (lower in cancer)
+    - DWI/HBV (hbv): High b-value DWI image (high signal in cancer)
+    """
     
     def __init__(self, data_list, transform=None, slice_axis=0):
         self.slice_data = []
@@ -129,9 +158,10 @@ class T2WDataset2D(Dataset):
             print("Warning: Empty data list provided to dataset!")
             return
         
-        print("Loading dataset and extracting slice indices...")
+        print("Loading multimodal dataset (T2W + ADC + DWI)...")
         for img_path, label_path, is_positive in tqdm(data_list):
             try:
+                # img_path contains T2W
                 img_sitk = sitk.ReadImage(img_path)
                 img_np = sitk.GetArrayFromImage(img_sitk).astype('float32')
                 
@@ -143,67 +173,120 @@ class T2WDataset2D(Dataset):
                 print(f"Error loading {img_path}: {e}")
                 continue
         
-        print(f"Total 2D slices: {len(self.slice_data)}")
+        print(f"Total multimodal slices: {len(self.slice_data)}")
     
     def __len__(self):
         return len(self.slice_data)
+    
+    def _load_modality(self, case_path, modality, slice_idx):
+        """Load a specific modality for a case.
+        
+        Expected directory structure:
+        data/mri_images/CASE_ID/
+            CASE_ID_XXXXXX_t2.mha
+            CASE_ID_XXXXXX_adc.mha
+            CASE_ID_XXXXXX_hbv.mha
+        """
+        try:
+            # case_path is already a full path like: /path/to/11471/11471_1001495_t2.mha
+            case_dir = Path(case_path).parent
+            
+            # Get base name without extension and without modality suffix
+            # From "11471_1001495_t2.mha" → "11471_1001495"
+            filename_base = Path(case_path).stem  # Remove .mha → "11471_1001495_t2"
+            case_base = filename_base.rsplit('_', 1)[0]  # Remove _t2 → "11471_1001495"
+            
+            # Construct modality path: 11471_1001495_adc.mha or 11471_1001495_hbv.mha
+            modality_path = case_dir / f"{case_base}_{modality}.mha"
+            
+            if not modality_path.exists():
+                print(f"Warning: {modality_path} not found, using T2W channel instead")
+                # Fallback: use T2W for missing modality
+                modality_path = case_path
+            
+            img_sitk = sitk.ReadImage(str(modality_path))
+            img_np = sitk.GetArrayFromImage(img_sitk).astype('float32')
+            
+            # Extract slice
+            if self.slice_axis == 0:
+                img_slice = img_np[slice_idx, :, :]
+            elif self.slice_axis == 1:
+                img_slice = img_np[:, slice_idx, :]
+            else:
+                img_slice = img_np[:, :, slice_idx]
+            
+            # Normalize per-slice [0, 1]
+            if img_slice.max() > img_slice.min():
+                img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min())
+            else:
+                img_slice = np.zeros_like(img_slice)
+            
+            return img_slice
+            
+        except Exception as e:
+            print(f"Error loading {modality}: {e}")
+            # Return zeros with standard size (will be resized later)
+            return np.zeros((256, 256), dtype='float32')
     
     def __getitem__(self, idx):
         img_path, label_path, slice_idx, is_positive = self.slice_data[idx]
         
         try:
-            img_np = sitk.GetArrayFromImage(sitk.ReadImage(img_path)).astype('float32')
+            # Load all three modalities
+            modality_slices = []
+            for modality in config.modalities:
+                img_slice = self._load_modality(img_path, modality, slice_idx)
+                modality_slices.append(img_slice)
+            
+            # Load label from label path (only one label, not modality-specific)
             label_np = sitk.GetArrayFromImage(sitk.ReadImage(label_path)).astype('int')
             
-            # extract slice
-            if self.slice_axis == 0:  # Axial
-                img_slice = img_np[slice_idx, :, :]
+            if self.slice_axis == 0:
                 label_slice = label_np[slice_idx, :, :]
-            elif self.slice_axis == 1:  # Sagittal
-                img_slice = img_np[:, slice_idx, :]
+            elif self.slice_axis == 1:
                 label_slice = label_np[:, slice_idx, :]
-            else:  # Coronal
-                img_slice = img_np[:, :, slice_idx]
-                label_slice = label_np[:, :, slice_idx]
-            
-            
-            # Normalize to [0, 1] range
-            if img_slice.max() > img_slice.min():
-                img_slice = (img_slice - img_slice.min()) / (img_slice.max() - img_slice.min())
             else:
-                img_slice = np.zeros_like(img_slice)
+                label_slice = label_np[:, :, slice_idx]
 
         except Exception as e:
             print(f"Error reading slice: {e}")
-            img_slice = np.random.rand(256, 256).astype('float32')  # ✅ 0-1
-            label_slice = np.zeros((256, 256), dtype=int)  # ✅ All zeros
+            # Return dummy 3-channel image
+            modality_slices = [np.random.rand(256, 256).astype('float32') for _ in range(3)]
+            label_slice = np.zeros((256, 256), dtype=int)
             is_positive = False
 
-        
-        img = torch.from_numpy(img_slice)
+        # Stack modalities to create 3-channel image
+        img_stacked = np.stack(modality_slices, axis=0)  # (3, H, W)
+        img = torch.from_numpy(img_stacked).float()
         label = torch.from_numpy(label_slice)
         is_positive_tensor = torch.tensor(is_positive, dtype=torch.bool)
         
         label = (label > 0).long()
         
-        # Resize to consistent size BEFORE augmentation to ensure batch compatibility
-        img = img.unsqueeze(0).unsqueeze(0).float()  # (1, 1, H, W)
+        # Resize to consistent size
+        img = img.unsqueeze(0)  # (1, 3, H, W)
         label = label.unsqueeze(0).unsqueeze(0).float()  # (1, 1, H, W)
         
         img_resized = F.interpolate(img, size=(256, 256), mode='bilinear', align_corners=False)
         label_resized = F.interpolate(label, size=(256, 256), mode='nearest')
         
-        img_resized = img_resized.squeeze(0).squeeze(0)  # (256, 256)
+        img_resized = img_resized.squeeze(0)  # (3, 256, 256)
         label_resized = label_resized.squeeze(0).squeeze(0).long()  # (256, 256)
         
         if self.transform:
-            img_resized, label_resized = self.transform(img_resized, label_resized)
+            # Apply transform to each modality separately
+            img_channels = []
+            for c in range(img_resized.shape[0]):
+                img_c, _ = self.transform(img_resized[c], label_resized)
+                img_channels.append(img_c)
+            img_resized = torch.stack(img_channels, dim=0)
         
-        # Ensure contiguous memory layout for DataLoader batching
-        img_out = img_resized.unsqueeze(0).contiguous()
+        # Ensure contiguous memory layout
+        img_out = img_resized.contiguous()
         label_out = label_resized.contiguous()
         
         return img_out, label_out, is_positive_tensor
+
 
 class Resize2DTransform:
     """Transform for resizing 2D images and labels"""
@@ -220,7 +303,7 @@ class Resize2DTransform:
         
         return resized_image.squeeze(0).squeeze(0), resized_label.squeeze(0).squeeze(0).long()
 
-"""# Model Architecture"""
+"""# Model Architecture - MULTIMODAL VERSION"""
 
 class DoubleConv2D(nn.Module):
     """(Conv2D -> BN -> ReLU) * 2"""
@@ -239,11 +322,16 @@ class DoubleConv2D(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
-class UNet2D(nn.Module):
-    """Standard 2D U-Net architecture"""
+class UNet2D_Multimodal(nn.Module):
+    """Standard 2D U-Net with 3-channel input (multimodal).
     
-    def __init__(self, in_ch=1, out_ch=1):
-        super(UNet2D, self).__init__()
+    Only change from baseline:
+    - Input channels: 3 (T2W, ADC, DWI)
+    - Everything else remains identical
+    """
+    
+    def __init__(self, in_ch=3, out_ch=1):  # 🆕 in_ch=3 for multimodal
+        super(UNet2D_Multimodal, self).__init__()
         
         # Encoder
         self.inc = DoubleConv2D(in_ch, 64)
@@ -298,7 +386,7 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
     running_loss = 0.0
     num_batches = 0
     
-    for images, labels, _ in tqdm(dataloader, desc="Training", colour="cyan"):
+    for images, labels, _ in tqdm(dataloader, desc="Training"):
         images = images.to(device)
         labels = labels.to(device).float().unsqueeze(1)
         
@@ -332,10 +420,10 @@ def validate_one_epoch(model, dataloader, criterion, device):
     
     return running_loss / num_batches
 
-"""# Evaluation Functions - SAMPLE-WISE METRICS"""
+"""# Evaluation Functions"""
 
 def calculate_dice_coefficient(pred, target, smooth=1e-8):
-    """Calculate Dice coefficient for a single sample"""
+    """Calculate Dice coefficient"""
     pred = pred.long()
     target = target.long()
     intersection = (pred * target).sum().item()
@@ -343,7 +431,7 @@ def calculate_dice_coefficient(pred, target, smooth=1e-8):
     return dice
 
 def calculate_iou(pred, target, smooth=1e-8):
-    """Calculate IoU for a single sample"""
+    """Calculate IoU"""
     pred = pred.long()
     target = target.long()
     intersection = (pred * target).sum().item()
@@ -364,10 +452,9 @@ def post_process_predictions(predictions, min_size=50, max_holes=30):
     return cleaned.astype(int)
 
 def test_model_comprehensive(model, test_loader, device, threshold=0.5):
-    """Calculate metrics PER SAMPLE (slice-wise), not pixel-wise"""
+    """Calculate metrics PER SAMPLE"""
     model.eval()
     
-    # Store per-sample metrics
     sample_dice_scores = []
     sample_iou_scores = []
     sample_f1_scores = []
@@ -375,7 +462,6 @@ def test_model_comprehensive(model, test_loader, device, threshold=0.5):
     sample_recall_scores = []
     sample_accuracy_scores = []
     
-    # For overall confusion matrix (optional)
     all_predictions = []
     all_targets = []
     
@@ -397,26 +483,21 @@ def test_model_comprehensive(model, test_loader, device, threshold=0.5):
                 )
             predictions = torch.from_numpy(predictions_np).to(device)
             
-            # Calculate metrics PER SAMPLE (each slice separately)
             for i in range(predictions.shape[0]):
                 pred_slice = predictions[i].cpu().numpy().flatten()
                 label_slice = labels[i].cpu().numpy().flatten()
                 
-                # Sample-wise Dice and IoU
                 dice = calculate_dice_coefficient(predictions[i], labels[i].float())
                 iou = calculate_iou(predictions[i], labels[i].float())
                 
-                # Convert to binary for sklearn metrics
                 pred_binary = pred_slice.astype(int)
                 label_binary = label_slice.astype(int)
                 
-                # Calculate per-sample classification metrics
                 accuracy = accuracy_score(label_binary, pred_binary)
                 f1 = f1_score(label_binary, pred_binary, average='binary', zero_division=0)
                 precision = precision_score(label_binary, pred_binary, average='binary', zero_division=0)
                 recall = recall_score(label_binary, pred_binary, average='binary', zero_division=0)
                 
-                # Store per-sample scores
                 sample_dice_scores.append(dice)
                 sample_iou_scores.append(iou)
                 sample_f1_scores.append(f1)
@@ -424,11 +505,9 @@ def test_model_comprehensive(model, test_loader, device, threshold=0.5):
                 sample_recall_scores.append(recall)
                 sample_accuracy_scores.append(accuracy)
                 
-                # Collect for global confusion matrix
                 all_predictions.extend(pred_binary)
                 all_targets.extend(label_binary)
     
-    # Calculate MEAN metrics across all samples
     mean_metrics = {
         'mean_dice': np.mean(sample_dice_scores),
         'std_dice': np.std(sample_dice_scores),
@@ -445,7 +524,6 @@ def test_model_comprehensive(model, test_loader, device, threshold=0.5):
         'num_samples': len(sample_dice_scores)
     }
     
-    # Overall confusion matrix
     all_predictions = np.array(all_predictions).astype(int)
     all_targets = np.array(all_targets).astype(int)
     confmat = confusion_matrix(all_targets, all_predictions)
@@ -454,12 +532,12 @@ def test_model_comprehensive(model, test_loader, device, threshold=0.5):
     return mean_metrics
 
 def print_test_results(test_results):
-    """Print sample-wise test results"""
+    """Print test results"""
     print("\n" + "=" * 60)
-    print("    SAMPLE-WISE MODEL EVALUATION RESULTS")
+    print("    SAMPLE-WISE MODEL EVALUATION RESULTS (MULTIMODAL)")
     print("=" * 60)
     print(f"Number of samples evaluated: {test_results['num_samples']}")
-    print("\n--- Mean Metrics Across All Samples (Sample-Wise) ---")
+    print("\n--- Mean Metrics Across All Samples ---")
     print(f"Dice Coefficient : {test_results['mean_dice']:.4f} ± {test_results['std_dice']:.4f}")
     print(f"IoU Score        : {test_results['mean_iou']:.4f} ± {test_results['std_iou']:.4f}")
     print(f"F1 Score         : {test_results['mean_f1']:.4f} ± {test_results['std_f1']:.4f}")
@@ -467,12 +545,12 @@ def print_test_results(test_results):
     print(f"Recall           : {test_results['mean_recall']:.4f} ± {test_results['std_recall']:.4f}")
     print(f"Accuracy         : {test_results['mean_accuracy']:.4f} ± {test_results['std_accuracy']:.4f}")
     print("=" * 60)
-    print("Overall Confusion Matrix (all pixels combined):")
+    print("Overall Confusion Matrix:")
     print(test_results['confusion_matrix'])
     print("=" * 60)
 
 def find_optimal_threshold(model, val_loader, device):
-    """Find optimal threshold by maximizing F1 score on validation set"""
+    """Find optimal threshold"""
     model.eval()
     all_outputs = []
     all_labels = []
@@ -502,7 +580,7 @@ def find_optimal_threshold(model, val_loader, device):
     return best_threshold
 
 def visualize_predictions(model, test_dataset, device, optimal_threshold, num_samples=3):
-    """Visualize predictions on test samples"""
+    """Visualize predictions"""
     model.eval()
     
     print(f"\nGenerating visualizations for {num_samples} samples...")
@@ -516,14 +594,15 @@ def visualize_predictions(model, test_dataset, device, optimal_threshold, num_sa
         with torch.no_grad():
             output_tensor = model(input_tensor)
         
-        img_cpu = img_tensor.squeeze(0).cpu().numpy()
+        # Use T2W channel (channel 0) for visualization
+        img_cpu = img_tensor[0].cpu().numpy()
         label_cpu = label_tensor.cpu().numpy()
         pred_cpu = (torch.sigmoid(output_tensor) > optimal_threshold).squeeze().cpu().numpy()
         
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         
         axes[0].imshow(img_cpu, cmap='bone')
-        axes[0].set_title(f'MRI Slice (Sample {sample_idx})')
+        axes[0].set_title(f'T2W (Sample {sample_idx}) - Multimodal')
         axes[0].axis('off')
         
         axes[1].imshow(label_cpu, cmap='gray')
@@ -546,10 +625,9 @@ def main():
     """Main execution function"""
     
     print("\n" + "="*60)
-    print("STARTING DATA LOADING")
+    print("STARTING DATA LOADING (MULTIMODAL)")
     print("="*60)
     
-    # NEW: Use improved data loading with full dataset
     try:
         positive_cases, negative_cases = load_full_dataset(
             config.labels_root,
@@ -562,7 +640,6 @@ def main():
         print(f"ERROR loading dataset: {e}")
         return
     
-    # NEW: Create stratified splits (70% train, 15% val, 15% test)
     try:
         splits = get_stratified_data_splits(
             positive_cases, 
@@ -576,27 +653,24 @@ def main():
         print(f"ERROR creating splits: {e}")
         return
     
-    # NEW: Create augmentation pipeline
     augmentation = MedicalImageAugmentation(
         rotation_angle=15,
-        enable_elastic=False,  # DISABLED for fast CPU testing, enable on GPU
+        enable_elastic=False,
         enable_intensity=True,
         intensity_variation=0.1
     )
     print(f"✓ Created augmentation pipeline")
     
-    # NEW: Create datasets (train with augmentation, val/test with base resize only)
     try:
-        train_dataset = T2WDataset2D(splits['train'], transform=augmentation, slice_axis=0)
-        # Val/Test: Still apply resize internally in __getitem__ but NO augmentation
-        val_dataset = T2WDataset2D(splits['val'], transform=None, slice_axis=0)
-        test_dataset = T2WDataset2D(splits['test'], transform=None, slice_axis=0)
-        print(f"✓ Created datasets: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
+        # 🆕 Use Multimodal dataset class
+        train_dataset = MultimodalT2WDataset(splits['train'], transform=augmentation, slice_axis=0)
+        val_dataset = MultimodalT2WDataset(splits['val'], transform=None, slice_axis=0)
+        test_dataset = MultimodalT2WDataset(splits['test'], transform=None, slice_axis=0)
+        print(f"✓ Created multimodal datasets: train={len(train_dataset)}, val={len(val_dataset)}, test={len(test_dataset)}")
     except Exception as e:
         print(f"ERROR creating datasets: {e}")
         return
     
-    # NEW: Create dataloaders with weighted sampling
     try:
         dataloaders = get_dataloaders(
             train_dataset, 
@@ -616,14 +690,14 @@ def main():
         return
     
     print("\n" + "="*60)
-    print("STARTING TRAINING")
+    print("STARTING TRAINING (MULTIMODAL: T2W + ADC + DWI)")
     print("="*60)
     
-    # Setup model, loss, optimizer
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    model = UNet2D(in_ch=1, out_ch=1).to(device)
+    # 🆕 Use Multimodal model with 3-channel input
+    model = UNet2D_Multimodal(in_ch=3, out_ch=1).to(device)
     
     criterion = BoundaryDiceFocalLoss(
         alpha=config.alpha,
@@ -632,15 +706,14 @@ def main():
         dice_weight=config.dice_weight,
         focal_weight=config.focal_weight,
         pos_weight=config.pos_weight 
-        )
+    )
     
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
     
-    # Training loop
     best_val_loss = float('inf')
     patience_counter = 0
-    checkpoint_path = os.path.join(config.checkpoint_dir, "best_model.pth")
+    checkpoint_path = os.path.join(config.checkpoint_dir, "best_model_multimodal.pth")
     
     for epoch in range(config.num_epochs):
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
@@ -671,32 +744,29 @@ def main():
     print("TRAINING COMPLETE!")
     print("="*60)
     
-    # Load best model
     if os.path.exists(checkpoint_path):
         print(f"Loading best model from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
     
-    # Find optimal threshold
     optimal_threshold = find_optimal_threshold(model, val_loader, device)
     
-    # Test with optimal threshold
     print(f"\n{'='*60}")
     print("TESTING WITH OPTIMAL THRESHOLD")
     print(f"{'='*60}")
     test_results = test_model_comprehensive(model, test_loader, device, threshold=optimal_threshold)
     print_test_results(test_results)
     
-    # Test with standard 0.5 threshold
     print(f"\n{'='*60}")
     print("TESTING WITH STANDARD THRESHOLD 0.5")
     print(f"{'='*60}")
     test_results_standard = test_model_comprehensive(model, test_loader, device, threshold=0.5)
     print_test_results(test_results_standard)
     
-    # Save results
-    results_path = os.path.join(config.checkpoint_dir, "test_results.json")
+    results_path = os.path.join(config.checkpoint_dir, "test_results_multimodal.json")
     results_to_save = {
+        'model_version': 'Multimodal (T2W + ADC + DWI)',
+        'modalities': config.modalities,
         'optimal_threshold': {
             'threshold': float(optimal_threshold),
             'metrics': {k: float(v) if isinstance(v, (int, float, np.number)) else v.tolist() 
@@ -714,11 +784,10 @@ def main():
     
     print(f"\nResults saved to: {results_path}")
     
-    # Visualize predictions
     visualize_predictions(model, test_dataset, device, optimal_threshold, num_samples=3)
     
     print(f"\n{'='*60}")
-    print("ALL DONE!")
+    print("ALL DONE (MULTIMODAL)")
     print(f"{'='*60}")
     print(f"Model saved to: {checkpoint_path}")
     print(f"Results saved to: {results_path}")
@@ -734,4 +803,5 @@ if __name__ == '__main__':
         print("\nPlease check:")
         print("1. Data paths are correct")
         print("2. Required packages are installed")
-        print("3. Data files exist and are readable")
+        print("3. ADC and DWI modality files exist (not just T2W)")
+        print("4. File naming convention: CASE_ID_XXXXXX_t2.mha, CASE_ID_XXXXXX_adc.mha, CASE_ID_XXXXXX_hbv.mha")
