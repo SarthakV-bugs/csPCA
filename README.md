@@ -107,14 +107,4 @@ Typical workflow:
 3. execute training code using the model and loss definitions
 4. inspect checkpoints and evaluate segmentation performance
 
-## Documentation
 
-Additional project context is available in the `Documentation` file and in the configuration comments within `config.py`.
-
-## License
-
-This repository does not currently declare a license in the root directory. If you plan to distribute or publish the project, consider adding an explicit license file before public release.
-
-## Project status
-
-This is a research-focused, configuration-driven segmentation project. It is best understood as a modular codebase for experimentation and model development rather than a turnkey application.
